@@ -44,7 +44,7 @@ youtube_url = st.text_input("Paste YouTube Lecture URL:", placeholder="https://w
 
 if st.button("Translate & Generate Subtitled Video", type="primary", disabled=not (youtube_url and gemini_api_key)):
     # 3. Lazy-import heavy modules only when button is clicked so the page never hangs on startup
-    from media_handler import download_youtube_video, render_subtitled_video
+    from media import download_youtube_video, render_subtitled_video
     from transcriber import load_whisper_model, transcribe_to_arabic_segments, save_segments_to_srt
     from translator import translate_segments_with_gemini
 
