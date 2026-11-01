@@ -1,36 +1,22 @@
 import os
 import subprocess
 from pathlib import Path
-import yt_dlp
 
-def download_youtube_video(youtube_url: str, output_dir: str) -> str:
-    """Downloads the YouTube lecture as a standard MP4 (up to 720p for fast processing)."""
-    output_template = os.path.join(output_dir, "source_lecture.%(ext)s")
+def save_uploaded_video(uploaded_file, output_dir: str) -> str:
+    """Saves the Streamlit UploadedFile object to a temporary local path in chunks."""
+    ext = Path(uploaded_file.name).suffix or ".mp4"
+    video_path = os.path.join(output_dir, f"source_lecture{ext}")
     
-    ydl_opts = {
-        # Prefer 720p H.264 MP4 so FFmpeg and players handle it cleanly without huge file sizes
-        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
-        'merge_output_format': 'mp4',
-        'outtmpl': output_template,
-        'quiet': True,
-        'no_warnings': True,
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(youtube_url, download=True)
-        
-    final_path = os.path.join(output_dir, "source_lecture.mp4")
-    if not os.path.exists(final_path):
-        # Fallback if yt-dlp saved with a different extension
-        for file in os.listdir(output_dir):
-            if file.startswith("source_lecture"):
-                return os.path.join(output_dir, file)
-    return final_path
+    uploaded_file.seek(0)
+    with open(video_path, "wb") as f:
+        while chunk := uploaded_file.read(1024 * 1024):  # Read in 1MB chunks to save RAM
+            f.write(chunk)
+            
+    return video_path
 
 def render_subtitled_video(video_path: str, srt_path: str, output_path: str, burn_in: bool = True) -> tuple[bool, str]:
     """Burns subtitles into video frames or embeds them as a soft track using FFmpeg."""
     if burn_in:
-        # Escape path for cross-platform FFmpeg subtitles filter
         escaped_srt = Path(srt_path).as_posix().replace(":", r"\:")
         style = (
             "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,"

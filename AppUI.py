@@ -3,13 +3,11 @@ import tempfile
 import traceback
 import streamlit as st
 
-# 1. MUST BE THE VERY FIRST STREAMLIT COMMAND
 st.set_page_config(page_title="APUMA Dars Translator", layout="centered")
 
 st.title("Islamic Lecture (Dars) Auto-Translator & Subtitler")
-st.write("Paste a YouTube lecture link -> Whisper transcribes Arabic -> Gemini translates to English -> FFmpeg burns subtitles.")
+st.write("Upload a lecture video -> Whisper transcribes Arabic -> Gemini translates to English -> FFmpeg burns subtitles.")
 
-# 2. Safely check for API key without crashing if secrets.toml doesn't exist
 def get_default_api_key() -> str:
     try:
         if "GEMINI_API_KEY" in st.secrets:
@@ -18,7 +16,6 @@ def get_default_api_key() -> str:
         pass
     return os.environ.get("GEMINI_API_KEY", "")
 
-# Sidebar Settings
 with st.sidebar:
     st.header("Configuration")
     gemini_api_key = st.text_input(
@@ -40,11 +37,13 @@ with st.sidebar:
         ["Burn-In (Hardcoded onto video frames)", "Soft-Sub (Instant embedded track - 3 seconds)"]
     ) == "Burn-In (Hardcoded onto video frames)"
 
-youtube_url = st.text_input("Paste YouTube Lecture URL:", placeholder="https://www.youtube.com/watch?v=...")
+uploaded_video = st.file_uploader(
+    "Upload Lecture Video (.mp4, .mkv, .mov)", 
+    type=["mp4", "mkv", "mov"]
+)
 
-if st.button("Translate & Generate Subtitled Video", type="primary", disabled=not (youtube_url and gemini_api_key)):
-    # 3. Lazy-import heavy modules only when button is clicked so the page never hangs on startup
-    from media import download_youtube_video, render_subtitled_video
+if st.button("Translate & Generate Subtitled Video", type="primary", disabled=not (uploaded_video and gemini_api_key)):
+    from media_handler import save_uploaded_video, render_subtitled_video
     from transcriber import load_whisper_model, transcribe_to_arabic_segments, save_segments_to_srt
     from translator import translate_segments_with_gemini
 
@@ -52,10 +51,10 @@ if st.button("Translate & Generate Subtitled Video", type="primary", disabled=no
         status = st.status("Running End-to-End Translation Pipeline...", expanded=True)
 
         try:
-            # STEP 1: Download Video
-            status.write("1/4 Downloading lecture video from YouTube...")
-            video_path = download_youtube_video(youtube_url, tmpdir)
-            status.write("✅ Video downloaded (`source_lecture.mp4`).")
+            # STEP 1: Save Uploaded Video
+            status.write("1/4 Saving uploaded video file...")
+            video_path = save_uploaded_video(uploaded_video, tmpdir)
+            status.write(f"✅ Video loaded (`{uploaded_video.name}`).")
 
             # STEP 2: Transcribe Arabic Audio with Whisper
             status.write(f"2/4 Transcribing Arabic speech using Whisper (`{whisper_model_size}`)...")
@@ -100,6 +99,7 @@ if st.button("Translate & Generate Subtitled Video", type="primary", disabled=no
                     st.session_state["en_srt"] = ef.read()
                 with open(arabic_srt_path, "rb") as af:
                     st.session_state["ar_srt"] = af.read()
+                st.session_state["original_filename"] = uploaded_video.name
             else:
                 status.update(label="FFmpeg Error", state="error")
                 st.error("FFmpeg failed to render the video:")
@@ -110,16 +110,17 @@ if st.button("Translate & Generate Subtitled Video", type="primary", disabled=no
             st.error(f"Error: {str(e)}")
             st.code(traceback.format_exc())
 
-# Display persistent Download Buttons if a run has completed
 if "final_video" in st.session_state:
     st.divider()
     st.subheader("Download Outputs")
+    base_name = os.path.splitext(st.session_state.get("original_filename", "dars"))[0]
+    
     col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
             "Download Subtitled Video (.mp4)",
             data=st.session_state["final_video"],
-            file_name="translated_dars.mp4",
+            file_name=f"{base_name}_english_subtitled.mp4",
             mime="video/mp4",
             type="primary"
         )
@@ -127,13 +128,13 @@ if "final_video" in st.session_state:
         st.download_button(
             "Download English (.srt)",
             data=st.session_state["en_srt"],
-            file_name="english_subtitles.srt",
+            file_name=f"{base_name}_english.srt",
             mime="text/plain"
         )
     with col3:
         st.download_button(
             "Download Arabic (.srt)",
             data=st.session_state["ar_srt"],
-            file_name="arabic_transcript.srt",
+            file_name=f"{base_name}_arabic.srt",
             mime="text/plain"
         )
