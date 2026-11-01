@@ -1,79 +1,139 @@
 import os
-import subprocess
-from pathlib import Path
-import yt_dlp
+import tempfile
+import traceback
+import streamlit as st
 
-def download_youtube_video(youtube_url: str, output_dir: str) -> str:
-    """Downloads the YouTube lecture with bot-bypass fallbacks and format flexibility."""
-    output_template = os.path.join(output_dir, "source_lecture.%(ext)s")
-    
-    ydl_opts = {
-        # 1. Flexible format: Grab up to 720p in whatever codec exists, then force MP4 merge
-        'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-        'merge_output_format': 'mp4',
-        'outtmpl': output_template,
-        
-        # 2. Bypass YouTube bot-checks using alternative player clients
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'web_creator', 'web']
-            }
-        },
-        
-        # 3. Network resiliency
-        'socket_timeout': 30,
-        'retries': 5,
-        'noplaylist': True,
-        
-        # 4. Don't hide errors so we can catch and display them
-        'quiet': False,
-        'no_warnings': False,
-    }
-    
+# 1. MUST BE THE VERY FIRST STREAMLIT COMMAND
+st.set_page_config(page_title="APUMA Dars Translator", layout="centered")
+
+st.title("Islamic Lecture (Dars) Auto-Translator & Subtitler")
+st.write("Paste a YouTube lecture link -> Whisper transcribes Arabic -> Gemini translates to English -> FFmpeg burns subtitles.")
+
+# 2. Safely check for API key without crashing if secrets.toml doesn't exist
+def get_default_api_key() -> str:
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
-    except Exception as e:
-        raise RuntimeError(f"YouTube Download Error: {str(e)}")
+        if "GEMINI_API_KEY" in st.secrets:
+            return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+    return os.environ.get("GEMINI_API_KEY", "")
 
-    # Locate the downloaded file (accounting for potential extension differences)
-    final_path = os.path.join(output_dir, "source_lecture.mp4")
-    if os.path.exists(final_path):
-        return final_path
-        
-    for file in os.listdir(output_dir):
-        if file.startswith("source_lecture"):
-            return os.path.join(output_dir, file)
+# Sidebar Settings
+with st.sidebar:
+    st.header("Configuration")
+    gemini_api_key = st.text_input(
+        "Gemini API Key",
+        value=get_default_api_key(),
+        type="password",
+        help="Get a free key at aistudio.google.com"
+    )
+    
+    whisper_model_size = st.selectbox(
+        "Whisper Model Size",
+        ["small", "medium", "large-v3"],
+        index=0,
+        help="Use 'small' on Streamlit Community Cloud (1GB RAM limit). Use 'large-v3' locally or on GPU."
+    )
+    use_gpu = st.checkbox("Use NVIDIA GPU (CUDA)", value=False)
+    burn_in = st.radio(
+        "Subtitle Rendering Mode",
+        ["Burn-In (Hardcoded onto video frames)", "Soft-Sub (Instant embedded track - 3 seconds)"]
+    ) == "Burn-In (Hardcoded onto video frames)"
+
+youtube_url = st.text_input("Paste YouTube Lecture URL:", placeholder="https://www.youtube.com/watch?v=...")
+
+if st.button("Translate & Generate Subtitled Video", type="primary", disabled=not (youtube_url and gemini_api_key)):
+    # 3. Lazy-import heavy modules only when button is clicked so the page never hangs on startup
+    from media_handler import download_youtube_video, render_subtitled_video
+    from transcriber import load_whisper_model, transcribe_to_arabic_segments, save_segments_to_srt
+    from translator import translate_segments_with_gemini
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        status = st.status("Running End-to-End Translation Pipeline...", expanded=True)
+
+        try:
+            # STEP 1: Download Video
+            status.write("1/4 Downloading lecture video from YouTube...")
+            video_path = download_youtube_video(youtube_url, tmpdir)
+            status.write("✅ Video downloaded (`source_lecture.mp4`).")
+
+            # STEP 2: Transcribe Arabic Audio with Whisper
+            status.write(f"2/4 Transcribing Arabic speech using Whisper (`{whisper_model_size}`)...")
+            model = load_whisper_model(whisper_model_size, use_gpu)
+            arabic_segments = transcribe_to_arabic_segments(video_path, model)
             
-    raise FileNotFoundError("The video downloaded, but the output file could not be found.")
+            arabic_srt_path = os.path.join(tmpdir, "arabic_transcript.srt")
+            save_segments_to_srt(arabic_segments, arabic_srt_path)
+            status.write(f"✅ Transcribed {len(arabic_segments)} Arabic subtitle segments.")
 
-def render_subtitled_video(video_path: str, srt_path: str, output_path: str, burn_in: bool = True) -> tuple[bool, str]:
-    """Burns subtitles into video frames or embeds them as a soft track using FFmpeg."""
-    if burn_in:
-        escaped_srt = Path(srt_path).as_posix().replace(":", r"\:")
-        style = (
-            "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,"
-            "BackColour=&H80000000,BorderStyle=4,Outline=0,Shadow=0,MarginV=25"
+            # STEP 3: Translate with Gemini API
+            status.write("3/4 Translating into English with Gemini 2.5 Flash...")
+            progress_bar = status.progress(0.0)
+            english_segments = translate_segments_with_gemini(
+                arabic_segments,
+                api_key=gemini_api_key,
+                batch_size=25,
+                progress_callback=lambda p: progress_bar.progress(p)
+            )
+            
+            english_srt_path = os.path.join(tmpdir, "english_translated.srt")
+            save_segments_to_srt(english_segments, english_srt_path)
+            status.write("✅ English translation complete.")
+
+            # STEP 4: Burn or Embed Subtitles with FFmpeg
+            output_video_path = os.path.join(tmpdir, "subtitled_dars.mp4")
+            status.write("4/4 Rendering final video with FFmpeg...")
+            success, error_log = render_subtitled_video(
+                video_path=video_path,
+                srt_path=english_srt_path,
+                output_path=output_video_path,
+                burn_in=burn_in
+            )
+
+            if success:
+                status.update(label="Pipeline Complete!", state="complete", expanded=False)
+                st.success("Your translated lecture is ready!")
+
+                with open(output_video_path, "rb") as vf:
+                    st.session_state["final_video"] = vf.read()
+                with open(english_srt_path, "rb") as ef:
+                    st.session_state["en_srt"] = ef.read()
+                with open(arabic_srt_path, "rb") as af:
+                    st.session_state["ar_srt"] = af.read()
+            else:
+                status.update(label="FFmpeg Error", state="error")
+                st.error("FFmpeg failed to render the video:")
+                st.code(error_log)
+
+        except Exception as e:
+            status.update(label="Pipeline Failed", state="error")
+            st.error(f"Error: {str(e)}")
+            st.code(traceback.format_exc())
+
+# Display persistent Download Buttons if a run has completed
+if "final_video" in st.session_state:
+    st.divider()
+    st.subheader("Download Outputs")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.download_button(
+            "Download Subtitled Video (.mp4)",
+            data=st.session_state["final_video"],
+            file_name="translated_dars.mp4",
+            mime="video/mp4",
+            type="primary"
         )
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-vf", f"subtitles='{escaped_srt}':force_style='{style}'",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "copy",
-            output_path
-        ]
-    else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-i", srt_path,
-            "-c:v", "copy",
-            "-c:a", "copy",
-            "-c:s", "mov_text",
-            "-metadata:s:s:0", "language=eng",
-            output_path
-        ]
-
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return (result.returncode == 0 and os.path.exists(output_path)), result.stderr
+    with col2:
+        st.download_button(
+            "Download English (.srt)",
+            data=st.session_state["en_srt"],
+            file_name="english_subtitles.srt",
+            mime="text/plain"
+        )
+    with col3:
+        st.download_button(
+            "Download Arabic (.srt)",
+            data=st.session_state["ar_srt"],
+            file_name="arabic_transcript.srt",
+            mime="text/plain"
+        )
