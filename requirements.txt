@@ -1,4 +1,1 @@
 streamlit
-yt-dlp
-faster-whisper
-google-genai
