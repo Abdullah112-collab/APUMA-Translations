@@ -43,7 +43,7 @@ uploaded_video = st.file_uploader(
 )
 
 if st.button("Translate & Generate Subtitled Video", type="primary", disabled=not (uploaded_video and gemini_api_key)):
-    from media_handler import save_uploaded_video, render_subtitled_video
+    from media import save_uploaded_video, render_subtitled_video
     from transcriber import load_whisper_model, transcribe_to_arabic_segments, save_segments_to_srt
     from translator import translate_segments_with_gemini
 
